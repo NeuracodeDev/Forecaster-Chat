@@ -1,0 +1,17 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: forecaster-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: forecaster
+      POSTGRES_USER: forecaster
+      POSTGRES_PASSWORD: forecaster
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+

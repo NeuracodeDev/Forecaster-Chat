@@ -1,0 +1,25 @@
+.DS_Store
+*.log
+*.pyc
+__pycache__/
+.venv/
+env/
+venv/
+
+# Backend artifacts
+backend/.mypy_cache/
+backend/.pytest_cache/
+backend/.ruff_cache/
+backend/.env
+backend/.venv/
+
+# Frontend artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.next/
+
+# Docker
+.docker/
+
+
