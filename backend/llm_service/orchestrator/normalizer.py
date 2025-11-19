@@ -9,6 +9,7 @@ from typing import Dict, List, Sequence
 
 from fastapi import HTTPException, status
 
+from core.configs.llm_config import ENABLE_WEB_SEARCH
 from llm_service.logic_modules.open_ai_client import OpenAIResponsesClient
 from llm_service.logic_modules.system_prompt import get_system_prompt
 from llm_service.orchestrator.file_processor import (
@@ -57,11 +58,24 @@ async def normalize_chunks(
 
     async def _worker(job: _NormalizationJob) -> None:
         async with semaphore:
+            chunk_ids = [chunk.chunk_id for chunk in job.chunks]
+            logger.info(
+                "normalizer.job.start",
+                extra={"chunk_ids": chunk_ids, "is_image": job.is_image, "chunk_count": len(job.chunks)},
+            )
             try:
                 result_chunks, issues = await _process_job(client, job)
             except Exception as exc:
                 logger.exception("Failed to normalize chunk batch: %s", exc)
                 raise HTTPException(status_code=500, detail="Normalization failed.") from exc
+            logger.info(
+                "normalizer.job.completed",
+                extra={
+                    "chunk_ids": chunk_ids,
+                    "result_fragment_count": len(result_chunks),
+                    "issues": issues,
+                },
+            )
 
         fragments.extend(result_chunks)
         for chunk in job.chunks:
@@ -97,7 +111,11 @@ async def _process_job(
     else:
         messages.append(_build_text_user_message(job.chunks[0]))
 
-    response_text = await client.create_text(messages)
+    create_kwargs = {}
+    if ENABLE_WEB_SEARCH:
+        create_kwargs["tools"] = [{"type": "web_search"}]
+
+    response_text = await client.create_text(messages, **create_kwargs)
 
     try:
         parsed = json.loads(response_text)
@@ -152,8 +170,6 @@ async def _build_image_user_message(
 
 def _build_text_user_message(chunk: ChunkDescriptor) -> dict:
     serialized = json.dumps(chunk.data, ensure_ascii=False) if chunk.data else "{}"
-    if len(serialized) > 4000:
-        serialized = serialized[:4000] + "..."
 
     prompt = (
         "Normalize the following data chunk into structured JSON fragments. "

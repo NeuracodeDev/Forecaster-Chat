@@ -1,3 +1,4 @@
+import logging
 from typing import Iterable
 
 from fastapi import APIRouter, FastAPI
@@ -9,9 +10,17 @@ from llm_service.routing_modules import chat_router as llm_chat_router
 API_PREFIX = "/api/v1"
 HEALTH_ROUTE = "/health"
 FRONTEND_ORIGINS: Iterable[str] = (
-    "http://localhost:5175",
-    "http://127.0.0.1:5175",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
 )
+
+
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+
 
 api_router = APIRouter(prefix=API_PREFIX, tags=["core"])
 
@@ -39,6 +48,7 @@ def register_routers(app: FastAPI) -> None:
 
 
 def create_app() -> FastAPI:
+    configure_logging()
     app = FastAPI(title="Forecaster API", version="0.1.0")
     configure_cors(app, origins=FRONTEND_ORIGINS)
     register_routers(app)
@@ -46,4 +56,3 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-

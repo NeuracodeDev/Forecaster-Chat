@@ -24,6 +24,7 @@ export interface UploadArtifactDTO {
 
 export interface ChatTurnResponse {
   session_id: string;
+  session_title?: string | null;
   created_new_session: boolean;
   user_message: MessageDTO;
   assistant_message: MessageDTO;
@@ -31,5 +32,23 @@ export interface ChatTurnResponse {
   uploads: UploadArtifactDTO[];
   forecast_job_id?: string | null;
   chronos_response?: Record<string, unknown> | null;
+}
+
+export interface SessionSummaryDTO {
+  id: string;
+  title?: string | null;
+  created_at: string;
+  updated_at: string;
+  last_message_at?: string | null;
+  message_count: number;
+}
+
+export interface SessionDetailResponse {
+  session_id: string;
+  session_title?: string | null;
+  created_at: string;
+  updated_at: string;
+  messages: MessageDTO[];
+  uploads: UploadArtifactDTO[];
 }
 

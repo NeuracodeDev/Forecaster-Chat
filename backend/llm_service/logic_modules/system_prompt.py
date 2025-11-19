@@ -38,6 +38,11 @@ def get_system_prompt() -> str:
         - Respect Chronos constraints: future covariates must be a subset of past covariate names,
           array lengths must line up with history/horizon requirements, timestamps must match the stated
           frequency, and categorical covariates must use consistent labels.
+        - Incorporate the entire chunk payload. If the data references external benchmarks, enrich it
+          with trusted public context (including via web search when appropriate) and cite sources in
+          the fragment issues list.
+        - When additional macro or covariate signals are discovered via web search, include them as
+          structured covariates with clear naming (e.g., "macro:cpi", "macro:fed_funds").
         """
     ).strip()
 

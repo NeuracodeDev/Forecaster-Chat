@@ -1,9 +1,19 @@
 import os
 from dotenv import load_dotenv
+
 load_dotenv()
 
-MODEL_NAME="gpt-5.1-2025-11-13"
-OPENAI_API_KEY=os.getenv("OPENAI_API_KEY")
-REASONING_EFFORT="high"
-VERBOSITY="high"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+MODEL_NAME = "gpt-5.1-2025-11-13"
+REASONING_EFFORT = "high"
+VERBOSITY = "high"
+
+TITLE_MODEL_NAME = "gpt-5-nano-2025-08-07"
+
+CSV_ROWS_PER_CHUNK = 400
+JSON_RECORDS_PER_CHUNK = 400
+TEXT_SENTENCES_PER_CHUNK = 40
+PDF_PAGES_PER_CHUNK = 5
+
+ENABLE_WEB_SEARCH = True

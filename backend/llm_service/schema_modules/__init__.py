@@ -1,4 +1,16 @@
-from .chat_io import ChatTurnResponse, MessageDTO, UploadArtifactDTO
+from .chat_io import (
+    ChatTurnResponse,
+    MessageDTO,
+    SessionDetailResponse,
+    SessionSummaryDTO,
+    UploadArtifactDTO,
+)
 
-__all__ = ["ChatTurnResponse", "MessageDTO", "UploadArtifactDTO"]
+__all__ = [
+    "ChatTurnResponse",
+    "MessageDTO",
+    "SessionSummaryDTO",
+    "SessionDetailResponse",
+    "UploadArtifactDTO",
+]
 

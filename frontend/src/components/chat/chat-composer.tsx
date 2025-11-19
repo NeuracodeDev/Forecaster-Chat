@@ -1,8 +1,8 @@
 import React, { useRef } from "react";
-import { Paperclip, Send, X } from "lucide-react";
+import { ArrowUp, Paperclip, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 interface ChatComposerProps {
@@ -38,55 +38,39 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     onFilesChange(next);
   };
 
-  const handleSubmit = (event: React.FormEvent) => {
-    event.preventDefault();
+  const handleSubmit = (event?: React.FormEvent) => {
+    event?.preventDefault();
     if (!message.trim() && files.length === 0) {
       return;
     }
     onSubmit();
   };
 
-  return (
-    <form className="flex flex-col gap-4 border-t bg-background/95 p-4 shadow-[0_-4px_12px_rgba(0,0,0,0.04)]" onSubmit={handleSubmit}>
-      <div className="flex items-center gap-2">
-        <Button
-          type="button"
-          variant="secondary"
-          className="h-10 w-10 shrink-0"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <Paperclip className="h-4 w-4" />
-        </Button>
-        <Input
-          value={message}
-          onChange={(event) => onMessageChange(event.target.value)}
-          placeholder="Ask Chronos a question..."
-          className="flex-1"
-          autoFocus
-        />
-        <Button type="submit" disabled={isSubmitting} className="h-10 w-10 shrink-0">
-          {isSubmitting ? (
-            <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-          ) : (
-            <Send className="h-4 w-4" />
-          )}
-        </Button>
-      </div>
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      handleSubmit();
+    }
+  };
 
+  return (
+    <form
+      className="mx-auto w-full max-w-3xl px-4 py-4"
+      onSubmit={handleSubmit}
+    >
       {files.length > 0 && (
-        <div className="flex flex-wrap gap-2">
+        <div className="mb-3 flex flex-wrap gap-2">
           {files.map((file, index) => (
             <span
               key={`${file.name}-${index}`}
               className={cn(
-                "inline-flex items-center gap-2 rounded-full border border-border bg-muted/60 px-3 py-1 text-xs",
-                "text-muted-foreground",
+                "inline-flex items-center gap-2 rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-foreground shadow-sm",
               )}
             >
-              <span className="max-w-[160px] truncate font-medium text-foreground">{file.name}</span>
+              <span className="max-w-[150px] truncate">{file.name}</span>
               <button
                 type="button"
-                className="text-muted-foreground transition-colors hover:text-destructive"
+                className="text-muted-foreground transition hover:text-destructive"
                 onClick={() => removeFile(index)}
               >
                 <X className="h-3 w-3" />
@@ -95,6 +79,50 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           ))}
         </div>
       )}
+
+      <div className="relative flex items-end gap-2 rounded-3xl border border-input bg-background p-2 shadow-sm transition-colors focus-within:border-ring/30 focus-within:ring-1 focus-within:ring-ring/30">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-10 w-10 shrink-0 rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <Paperclip className="h-5 w-5" />
+          <span className="sr-only">Attach</span>
+        </Button>
+
+        <Textarea
+          value={message}
+          onChange={(event) => {
+             onMessageChange(event.target.value);
+             event.target.style.height = 'auto';
+             event.target.style.height = `${event.target.scrollHeight}px`;
+          }}
+          onKeyDown={handleKeyDown}
+          placeholder="Message Chronos..."
+          className="min-h-[40px] max-h-[200px] flex-1 resize-none border-0 bg-transparent px-2 py-2.5 shadow-none focus-visible:ring-0 text-sm leading-relaxed"
+          rows={1}
+        />
+
+        <Button
+          type="submit"
+          size="icon"
+          disabled={isSubmitting || (!message.trim() && files.length === 0)}
+          className="shrink-0 rounded-full bg-foreground text-background shadow-sm transition-all hover:bg-foreground/90 disabled:opacity-60"
+        >
+          {isSubmitting ? (
+            <span className="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+          ) : (
+            <ArrowUp className="h-6 w-6" />
+          )}
+          <span className="sr-only">Send</span>
+        </Button>
+      </div>
+
+      <p className="mt-3 text-center text-[10px] text-muted-foreground">
+        Supports CSV, TSV, JSON, TXT, PDF, and up to 20 images per turn.
+      </p>
 
       <input
         ref={fileInputRef}
@@ -107,4 +135,3 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     </form>
   );
 };
-

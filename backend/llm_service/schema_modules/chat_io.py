@@ -31,6 +31,7 @@ class UploadArtifactDTO(BaseModel):
 
 class ChatTurnResponse(BaseModel):
     session_id: UUID
+    session_title: Optional[str] = None
     created_new_session: bool
     user_message: MessageDTO
     assistant_message: MessageDTO
@@ -38,4 +39,22 @@ class ChatTurnResponse(BaseModel):
     uploads: List[UploadArtifactDTO]
     forecast_job_id: Optional[UUID] = None
     chronos_response: Optional[dict] = None
+
+
+class SessionSummaryDTO(BaseModel):
+    id: UUID
+    title: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    last_message_at: Optional[datetime] = None
+    message_count: int
+
+
+class SessionDetailResponse(BaseModel):
+    session_id: UUID
+    session_title: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    messages: List[MessageDTO]
+    uploads: List[UploadArtifactDTO]
 

@@ -1,4 +1,8 @@
-import type { ChatTurnResponse } from "@/types/chat";
+import type {
+  ChatTurnResponse,
+  SessionDetailResponse,
+  SessionSummaryDTO,
+} from "@/types/chat";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api/v1";
 
@@ -32,6 +36,28 @@ export async function submitChatMessage({
     throw new Error(text || "Failed to submit chat message.");
   }
 
+  return response.json();
+}
+
+export async function fetchSessions(): Promise<SessionSummaryDTO[]> {
+  const response = await fetch(`${API_BASE}/chat/sessions`, {
+    method: "GET",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || "Failed to fetch sessions.");
+  }
+  return response.json();
+}
+
+export async function fetchSessionDetail(sessionId: string): Promise<SessionDetailResponse> {
+  const response = await fetch(`${API_BASE}/chat/session/${sessionId}`, {
+    method: "GET",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || "Failed to fetch session.");
+  }
   return response.json();
 }
 

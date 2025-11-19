@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import List, Sequence
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.session import get_session
+from llm_service.logic_modules.open_ai_client import OpenAIResponsesClient
+from llm_service.logic_modules.title_generator import generate_chat_title
 from llm_service.models_modules.sessions import (
     ConversationSession,
     Message,
@@ -16,10 +20,17 @@ from llm_service.models_modules.sessions import (
 )
 from llm_service.orchestrator.file_processor import STORAGE_ROOT
 from llm_service.orchestrator.pipeline import ForecastPipeline
-from llm_service.schema_modules import ChatTurnResponse, MessageDTO, UploadArtifactDTO
+from llm_service.schema_modules import (
+    ChatTurnResponse,
+    MessageDTO,
+    SessionDetailResponse,
+    SessionSummaryDTO,
+    UploadArtifactDTO,
+)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 pipeline = ForecastPipeline()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/message", response_model=ChatTurnResponse, status_code=status.HTTP_201_CREATED)
@@ -29,6 +40,15 @@ async def submit_message(
     files: List[UploadFile] | None = File(default=None),
     db: AsyncSession = Depends(get_session),
 ) -> ChatTurnResponse:
+    logger.info(
+        "chat_api.submit_message.start",
+        extra={
+            "session_id": str(session_id) if session_id else None,
+            "has_files": bool(files),
+            "file_count": len(files or []),
+            "has_content": bool(content),
+        },
+    )
     files = files or []
     if not content and not files:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provide content or at least one file.")
@@ -39,8 +59,7 @@ async def submit_message(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation session not found.")
         created_new_session = False
     else:
-        title = _derive_session_title(content, files)
-        session = ConversationSession(title=title)
+        session = ConversationSession()
         db.add(session)
         await db.flush()
         created_new_session = True
@@ -54,7 +73,18 @@ async def submit_message(
     )
 
     uploads = await _store_uploads(db, session.id, user_message.id, files)
+    logger.info(
+        "chat_api.uploads.stored",
+        extra={"session_id": str(session.id), "message_id": str(user_message.id), "upload_count": len(uploads)},
+    )
 
+    if created_new_session:
+        await _ensure_session_title(db, session, content=content, files=files)
+
+    logger.info(
+        "chat_api.pipeline.run.start",
+        extra={"session_id": str(session.id), "message_id": str(user_message.id), "upload_count": len(uploads)},
+    )
     result = await pipeline.run(db, session, user_message, uploads)
 
     assistant = await _get_message(db, result["assistant_message_id"])
@@ -77,6 +107,7 @@ async def submit_message(
 
     response = ChatTurnResponse(
         session_id=session.id,
+        session_title=session.title,
         created_new_session=created_new_session,
         user_message=_serialize_message(user_message),
         assistant_message=_serialize_message(assistant),
@@ -86,7 +117,81 @@ async def submit_message(
         chronos_response=chronos_response,
     )
 
+    logger.info(
+        "chat_api.submit_message.completed",
+        extra={
+            "session_id": str(session.id),
+            "user_message_id": str(user_message.id),
+            "assistant_message_id": str(assistant.id),
+            "tool_count": len(tool_messages),
+            "upload_count": len(uploads),
+            "forecast_job_id": result.get("forecast_job_id"),
+        },
+    )
+
     return response
+
+
+@router.get("/sessions", response_model=List[SessionSummaryDTO], status_code=status.HTTP_200_OK)
+async def list_sessions(
+    db: AsyncSession = Depends(get_session),
+) -> List[SessionSummaryDTO]:
+    last_activity = func.coalesce(func.max(Message.created_at), ConversationSession.updated_at)
+    stmt = (
+        select(
+            ConversationSession.id,
+            ConversationSession.title,
+            ConversationSession.created_at,
+            ConversationSession.updated_at,
+            func.count(Message.id).label("message_count"),
+            func.max(Message.created_at).label("last_message_at"),
+        )
+        .outerjoin(Message, Message.session_id == ConversationSession.id)
+        .group_by(ConversationSession.id)
+        .order_by(last_activity.desc())
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+    summaries: List[SessionSummaryDTO] = []
+    for row in rows:
+        summaries.append(
+            SessionSummaryDTO(
+                id=row.id,
+                title=row.title,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+                last_message_at=row.last_message_at,
+                message_count=row.message_count,
+            )
+        )
+    return summaries
+
+
+@router.get("/session/{session_id}", response_model=SessionDetailResponse, status_code=status.HTTP_200_OK)
+async def get_session_detail(
+    session_id: UUID,
+    db: AsyncSession = Depends(get_session),
+) -> SessionDetailResponse:
+    session = await db.get(ConversationSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation session not found.")
+
+    messages_result = await db.execute(
+        select(Message).where(Message.session_id == session_id).order_by(Message.sequence_index)
+    )
+    uploads_result = await db.execute(select(UploadArtifact).where(UploadArtifact.session_id == session_id))
+
+    messages = [_serialize_message(message) for message in messages_result.scalars().all()]
+    uploads = [_serialize_upload(upload) for upload in uploads_result.scalars().all()]
+
+    return SessionDetailResponse(
+        session_id=session.id,
+        session_title=session.title,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        messages=messages,
+        uploads=uploads,
+    )
 
 
 async def _store_uploads(
@@ -134,14 +239,39 @@ async def _write_file(upload: UploadFile, destination: Path) -> int:
     return destination.stat().st_size
 
 
-def _derive_session_title(content: str | None, files: Sequence[UploadFile]) -> str | None:
-    if content:
-        stripped = content.strip()
-        if stripped:
-            return stripped[:120]
-    if files:
-        filename = Path(files[0].filename or "Upload").stem
-        return filename[:120]
+async def _ensure_session_title(
+    db: AsyncSession,
+    session: ConversationSession,
+    *,
+    content: str | None,
+    files: Sequence[UploadFile],
+) -> None:
+    if session.title:
+        return
+
+    stripped = (content or "").strip()
+    if stripped:
+        async with OpenAIResponsesClient() as client:
+            session.title = await generate_chat_title(
+                client=client,
+                first_user_message=stripped,
+            )
+        db.add(session)
+        await db.flush()
+        return
+
+    fallback = _derive_upload_title(files)
+    if fallback:
+        session.title = fallback
+        db.add(session)
+        await db.flush()
+
+
+def _derive_upload_title(files: Sequence[UploadFile]) -> str | None:
+    for upload in files:
+        filename = Path(upload.filename or "").stem
+        if filename:
+            return filename[:120]
     return None
 
 

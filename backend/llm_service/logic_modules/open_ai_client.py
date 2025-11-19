@@ -3,13 +3,48 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, MutableMapping, Sequence
-
 from openai import AsyncOpenAI
 from openai.types.responses import Response
 
 from core.configs.llm_config import MODEL_NAME, OPENAI_API_KEY, REASONING_EFFORT, VERBOSITY
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_content(content: Any, role: str) -> list[dict[str, Any]]:
+    """
+    Convert simple string content into the Responses API rich content format.
+    """
+    text_type = "output_text" if role == "assistant" else "input_text"
+
+    if isinstance(content, list):
+        normalized: list[dict[str, Any]] = []
+        for item in content:
+            if isinstance(item, dict) and "type" in item:
+                if item["type"] in {"text", "input_text", "output_text"}:
+                    normalized.append({"type": text_type if item["type"] != "output_text" else "output_text", "text": item.get("text", "")})
+                else:
+                    normalized.append(item)
+            else:
+                normalized.append({"type": text_type, "text": str(item)})
+        return normalized
+
+    if content is None:
+        return [{"type": text_type, "text": ""}]
+
+    return [{"type": text_type, "text": str(content)}]
+
+
+def _prepare_response_input(messages: Sequence[Dict[str, Any]]) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for message in messages:
+        role = message.get("role", "user")
+        content = _coerce_content(message.get("content"), role)
+        prepared.append({"role": role, "content": content})
+    return prepared
+
+
+
 
 
 class OpenAIResponsesClient:
@@ -52,6 +87,7 @@ class OpenAIResponsesClient:
         self,
         messages: Sequence[Dict[str, Any]],
         *,
+        model_name: str | None = None,
         reasoning_effort: str | None = None,
         response_format: Dict[str, Any] | None = None,
         tools: Sequence[Dict[str, Any]] | None = None,
@@ -67,8 +103,8 @@ class OpenAIResponsesClient:
         """
 
         payload: Dict[str, Any] = {
-            "model": self._model,
-            "messages": list(messages),
+            "model": model_name or self._model,
+            "input": _prepare_response_input(messages),
         }
 
         effort = reasoning_effort or self._default_reasoning_effort
@@ -95,10 +131,11 @@ class OpenAIResponsesClient:
         if extra_options:
             payload.update(extra_options)
 
-        logger.debug(
-            "openai.responses.create",
+        logger.info(
+            "openai.responses.create.start",
             extra={
                 "model": payload["model"],
+                "input_messages": len(payload["input"]),
                 "reasoning_effort": payload.get("reasoning"),
                 "max_output_tokens": payload.get("max_output_tokens"),
                 "has_tools": bool(tools),
@@ -107,9 +144,13 @@ class OpenAIResponsesClient:
 
         response = await self._client.responses.create(**payload)
 
-        logger.debug(
-            "openai.responses.completed",
-            extra={"response_id": response.id, "model": response.model, "usage": getattr(response, "usage", None)},
+        logger.info(
+            "openai.responses.create.completed",
+            extra={
+                "response_id": response.id,
+                "model": response.model,
+                "usage": getattr(response, "usage", None),
+            },
         )
         return response
 
@@ -117,18 +158,25 @@ class OpenAIResponsesClient:
         self,
         messages: Sequence[Dict[str, Any]],
         *,
+        model_name: str | None = None,
         reasoning_effort: str | None = None,
         **kwargs: Any,
     ) -> str:
         """Convenience helper returning the combined text output."""
 
-        response = await self.create_response(messages, reasoning_effort=reasoning_effort, **kwargs)
+        response = await self.create_response(
+            messages,
+            model_name=model_name,
+            reasoning_effort=reasoning_effort,
+            **kwargs,
+        )
         return response.output_text
 
     async def stream_text(
         self,
         messages: Sequence[Dict[str, Any]],
         *,
+        model_name: str | None = None,
         reasoning_effort: str | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
@@ -140,8 +188,8 @@ class OpenAIResponsesClient:
         """
 
         payload: Dict[str, Any] = {
-            "model": self._model,
-            "messages": list(messages),
+            "model": model_name or self._model,
+            "input": _prepare_response_input(messages),
         }
 
         effort = reasoning_effort or self._default_reasoning_effort

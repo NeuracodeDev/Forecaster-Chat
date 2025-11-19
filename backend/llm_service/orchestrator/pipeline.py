@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from typing import List, Sequence
 import uuid
@@ -36,6 +37,8 @@ from llm_service.models_modules.sessions import (
 from llm_service.orchestrator.file_processor import ChunkDescriptor, process_upload_artifact
 from llm_service.orchestrator.normalizer import NormalizationResult, normalize_chunks
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_TARGET_CONFIG = ChronosTargetConfig(
     context_budget=8192,
     prediction_budget=128,
@@ -67,10 +70,18 @@ class ForecastPipeline:
     ) -> dict:
         async with OpenAIResponsesClient() as client:
             if not uploads:
+                logger.info(
+                    "pipeline.run.chat_only",
+                    extra={"session_id": str(session.id), "message_id": str(message.id)},
+                )
                 assistant_message = await self._run_chat_only(db, session, message, client)
                 await db.commit()
                 return {"assistant_message_id": str(assistant_message.id)}
 
+            logger.info(
+                "pipeline.run.upload_flow.start",
+                extra={"session_id": str(session.id), "message_id": str(message.id), "upload_count": len(uploads)},
+            )
             result = await self._run_with_uploads(db, session, message, uploads, client)
             await db.commit()
             return result
@@ -106,6 +117,14 @@ class ForecastPipeline:
         chunk_descriptors: List[ChunkDescriptor] = []
         for upload in uploads:
             chunk_descriptors.extend(process_upload_artifact(upload))
+        logger.info(
+            "pipeline.chunks.prepared",
+            extra={
+                "session_id": str(session.id),
+                "message_id": str(message.id),
+                "chunk_count": len(chunk_descriptors),
+            },
+        )
 
         normalization = await normalize_chunks(client, chunk_descriptors)
         fragments = [

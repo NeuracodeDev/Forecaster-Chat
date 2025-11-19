@@ -56,19 +56,20 @@ def build_chat_messages(
     messages: List[dict] = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
 
     for entry in history:
-        role = entry.role.value
-        if role == MessageRole.TOOL.value:
-            role = "tool"
-        messages.append(
-            {
-                "role": role,
-                "content": (entry.content or "").strip(),
-            }
-        )
+        role = entry.role
+        content = (entry.content or "").strip()
+
+        if role == MessageRole.TOOL:
+            role_payload = "[TOOL RESPONSE]\n" + content if content else "[TOOL RESPONSE]"
+            messages.append({"role": "assistant", "content": role_payload})
+        else:
+            rendered_role = role.value if role in (MessageRole.USER, MessageRole.ASSISTANT) else "assistant"
+            messages.append({"role": rendered_role, "content": content})
 
     if extra_tool_messages:
         for payload in extra_tool_messages:
-            messages.append({"role": "tool", "content": payload})
+            prefix = "[TOOL RESPONSE]\n" if payload else "[TOOL RESPONSE]"
+            messages.append({"role": "assistant", "content": prefix + (payload or "")})
 
     return messages
 

@@ -1,24 +1,28 @@
 from __future__ import annotations
 
+import json
+import logging
 import mimetypes
-import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import List
 
 from fastapi import HTTPException, status
 
+from core.configs.llm_config import (
+    CSV_ROWS_PER_CHUNK,
+    JSON_RECORDS_PER_CHUNK,
+    PDF_PAGES_PER_CHUNK,
+    TEXT_SENTENCES_PER_CHUNK,
+)
 from llm_service.models_modules.sessions import UploadArtifact
 
+
+logger = logging.getLogger(__name__)
 
 IMAGE_MIME_PREFIXES = {"image/"}
 MAX_IMAGE_BATCH = 5
 MAX_IMAGES_PER_REQUEST = 20
-
-PDF_PAGES_PER_CHUNK = 5
-CSV_ROWS_PER_CHUNK = 400
-JSON_RECORDS_PER_CHUNK = 400
-TEXT_SENTENCES_PER_CHUNK = 40
 
 STORAGE_ROOT = Path("/app/storage/uploads")
 
@@ -76,16 +80,27 @@ def _is_image(mime_type: str) -> bool:
 
 
 def _chunk_pdf(artifact: UploadArtifact, path: Path, mime_type: str) -> List[ChunkDescriptor]:
+    reader = None
+    total_pages = PDF_PAGES_PER_CHUNK
     try:
         import pypdf  # noqa: F401
+
         reader = pypdf.PdfReader(str(path))
         total_pages = len(reader.pages)
     except Exception:  # pragma: no cover
-        total_pages = PDF_PAGES_PER_CHUNK
+        logger.warning("Failed to parse PDF text; only metadata will be provided.", exc_info=True)
 
     chunks: List[ChunkDescriptor] = []
     for chunk_index, start_page in enumerate(range(0, total_pages, PDF_PAGES_PER_CHUNK)):
         end_page = min(start_page + PDF_PAGES_PER_CHUNK, total_pages)
+        page_texts: List[str] = []
+        if reader is not None:
+            for page_num in range(start_page, end_page):
+                try:
+                    page_texts.append(reader.pages[page_num].extract_text() or "")
+                except Exception:  # pragma: no cover
+                    page_texts.append("")
+
         descriptor = ChunkDescriptor(
             upload_id=str(artifact.id),
             chunk_id=f"{artifact.id}_pdf_{chunk_index}",
@@ -96,6 +111,7 @@ def _chunk_pdf(artifact: UploadArtifact, path: Path, mime_type: str) -> List[Chu
                 "page_start": start_page,
                 "page_end": end_page,
                 "description": f"Pages {start_page + 1}–{end_page} of PDF {path.name}",
+                "text": "\n".join(page_texts) if page_texts else None,
             },
         )
         chunks.append(descriptor)
@@ -103,16 +119,19 @@ def _chunk_pdf(artifact: UploadArtifact, path: Path, mime_type: str) -> List[Chu
 
 
 def _chunk_csv(artifact: UploadArtifact, path: Path, mime_type: str) -> List[ChunkDescriptor]:
-    import pandas as pd
+    with path.open("r", encoding="utf-8", errors="ignore") as fh:
+        lines = [line.rstrip("\n") for line in fh if line.rstrip("\n")]
 
-    try:
-        iterator = pd.read_csv(path, chunksize=CSV_ROWS_PER_CHUNK)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {exc}") from exc
+    if not lines:
+        raise HTTPException(status_code=400, detail="CSV file is empty.")
 
+    header = lines[0]
+    rows = lines[1:]
     chunks: List[ChunkDescriptor] = []
-    for idx, chunk in enumerate(iterator):
-        data_preview = chunk.head(5).to_json(orient="records")
+
+    for idx in range(0, len(rows), CSV_ROWS_PER_CHUNK):
+        chunk_rows = rows[idx : idx + CSV_ROWS_PER_CHUNK]
+        raw_csv = "\n".join([header, *chunk_rows])
         descriptor = ChunkDescriptor(
             upload_id=str(artifact.id),
             chunk_id=f"{artifact.id}_csv_{idx}",
@@ -120,20 +139,30 @@ def _chunk_csv(artifact: UploadArtifact, path: Path, mime_type: str) -> List[Chu
             mime_type=mime_type,
             content_hint="csv",
             data={
-                "start_row": idx * CSV_ROWS_PER_CHUNK,
-                "end_row": idx * CSV_ROWS_PER_CHUNK + len(chunk),
-                "columns": list(chunk.columns),
-                "preview": data_preview,
+                "format": "csv",
+                "header": header,
+                "row_start": idx + 1,
+                "row_end": idx + len(chunk_rows),
+                "row_count": len(chunk_rows),
+                "raw_csv": raw_csv,
                 "chunk_path": str(path),
             },
         )
         chunks.append(descriptor)
+
+    logger.info(
+        "file_processor.chunk_csv.completed",
+        extra={
+            "upload_id": str(artifact.id),
+        "path": str(path),
+        "chunk_count": len(chunks),
+        "total_rows": len(rows),
+        },
+    )
     return chunks
 
 
 def _chunk_json(artifact: UploadArtifact, path: Path, mime_type: str) -> List[ChunkDescriptor]:
-    import json
-
     records: List[str]
     with path.open("r", encoding="utf-8") as fh:
         content = fh.read().strip()

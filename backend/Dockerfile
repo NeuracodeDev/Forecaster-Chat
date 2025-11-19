@@ -19,5 +19,5 @@ COPY . .
 
 EXPOSE 8320
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8320"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8320", "--reload"]
 
