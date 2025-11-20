@@ -69,3 +69,5 @@ cd backend && ruff check .
 
 Chronos Chat is released under the [MIT License](LICENSE) © 2025 Neura. You are free to use, modify, and distribute the project provided the license notice is preserved.
 
+See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for third-party attributions, including Chronos (Apache 2.0).
+
