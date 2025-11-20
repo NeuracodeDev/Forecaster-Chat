@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
-from typing import List, Sequence
+from typing import Any, AsyncIterator, List, Sequence
 import uuid
 
 from sqlalchemy import select, func
@@ -36,6 +36,7 @@ from llm_service.models_modules.sessions import (
 )
 from llm_service.orchestrator.file_processor import ChunkDescriptor, process_upload_artifact
 from llm_service.orchestrator.normalizer import NormalizationResult, normalize_chunks
+from core.configs.llm_config import ENABLE_WEB_SEARCH
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,100 @@ class ForecastPipeline:
     def __init__(self) -> None:
         self.target_config = DEFAULT_TARGET_CONFIG
         self.global_context_template = DEFAULT_GLOBAL_CONTEXT
+        self._tooling: dict[str, Any] = {"tools": [{"type": "web_search"}]} if ENABLE_WEB_SEARCH else {}
+
+    async def run_generator(
+        self,
+        db: AsyncSession,
+        session: ConversationSession,
+        message: Message,
+        uploads: Sequence[UploadArtifact],
+    ) -> AsyncIterator[dict[str, Any]]:
+        async with OpenAIResponsesClient() as client:
+            if not uploads:
+                logger.info(
+                    "pipeline.run.chat_only",
+                    extra={"session_id": str(session.id), "message_id": str(message.id)},
+                )
+                yield {"status": "preparing_response"}
+                yield {"status": "reasoning"}
+                assistant_message = await self._run_chat_only(db, session, message, client)
+                await db.commit()
+                yield {"status": "done", "data": {"assistant_message_id": str(assistant_message.id)}}
+                return
+
+            logger.info(
+                "pipeline.run.upload_flow.start",
+                extra={"session_id": str(session.id), "message_id": str(message.id), "upload_count": len(uploads)},
+            )
+            yield {"status": "structuring"}
+            chunk_descriptors: List[ChunkDescriptor] = []
+            for upload in uploads:
+                chunk_descriptors.extend(process_upload_artifact(upload))
+            logger.info(
+                "pipeline.chunks.prepared",
+                extra={
+                    "session_id": str(session.id),
+                    "message_id": str(message.id),
+                    "chunk_count": len(chunk_descriptors),
+                },
+            )
+
+            normalization = await normalize_chunks(client, chunk_descriptors)
+            fragments = [
+                SeriesFragment.model_validate(fragment) for fragment in normalization.fragments
+            ]
+
+            payload = self._build_payload(
+                fragments=fragments,
+                job_id=str(message.id),
+            )
+
+            yield {"status": "inference_start"}
+            chronos_response = await asyncio.to_thread(run_forecast, payload, batch_size=16)
+            yield {"status": "inference_complete"}
+
+            forecast_job = await self._persist_forecast_results(
+                db, session.id, message.id, payload, chronos_response
+            )
+
+            await self._update_uploads(db, uploads, normalization)
+
+            digest = self._compose_forecast_digest(forecast_job, chronos_response)
+            tool_summary = render_digest(digest)
+            tool_message = await self._create_message(
+                db,
+                session_id=session.id,
+                role=MessageRole.TOOL,
+                content=tool_summary,
+                raw_payload={"forecast_job_id": str(forecast_job.id)},
+            )
+            raw_json_message = await self._create_message(
+                db,
+                session_id=session.id,
+                role=MessageRole.TOOL,
+                content=render_digest_json(digest),
+                raw_payload={
+                    "forecast_job_id": str(forecast_job.id),
+                    "chronos_response": chronos_response.model_dump(),
+                },
+            )
+
+            yield {"status": "preparing_response"}
+            assistant_message = await self._generate_assistant_reply(
+                db, session, client, forecast_job_id=forecast_job.id
+            )
+            await db.commit()
+
+            yield {
+                "status": "done",
+                "data": {
+                    "forecast_job_id": str(forecast_job.id),
+                    "tool_message_id": str(tool_message.id),
+                    "assistant_message_id": str(assistant_message.id),
+                    "raw_tool_message_id": str(raw_json_message.id),
+                },
+            }
 
     async def run(
         self,
@@ -68,23 +163,12 @@ class ForecastPipeline:
         message: Message,
         uploads: Sequence[UploadArtifact],
     ) -> dict:
-        async with OpenAIResponsesClient() as client:
-            if not uploads:
-                logger.info(
-                    "pipeline.run.chat_only",
-                    extra={"session_id": str(session.id), "message_id": str(message.id)},
-                )
-                assistant_message = await self._run_chat_only(db, session, message, client)
-                await db.commit()
-                return {"assistant_message_id": str(assistant_message.id)}
-
-            logger.info(
-                "pipeline.run.upload_flow.start",
-                extra={"session_id": str(session.id), "message_id": str(message.id), "upload_count": len(uploads)},
-            )
-            result = await self._run_with_uploads(db, session, message, uploads, client)
-            await db.commit()
-            return result
+        """Backward compatibility wrapper for run_generator."""
+        final_result = {}
+        async for event in self.run_generator(db, session, message, uploads):
+            if event["status"] == "done":
+                final_result = event["data"]
+        return final_result
 
     async def _run_chat_only(
         self,
@@ -95,7 +179,7 @@ class ForecastPipeline:
     ) -> Message:
         history = await self._load_history(db, session.id)
         messages_payload = build_chat_messages(history=history)
-        assistant_text = await client.create_text(messages_payload)
+        assistant_text = await client.create_text(messages_payload, **self._tooling)
 
         assistant_message = await self._create_message(
             db,
@@ -114,6 +198,7 @@ class ForecastPipeline:
         uploads: Sequence[UploadArtifact],
         client: OpenAIResponsesClient,
     ) -> dict:
+        """Deprecated: logic moved to run_generator."""
         chunk_descriptors: List[ChunkDescriptor] = []
         for upload in uploads:
             chunk_descriptors.extend(process_upload_artifact(upload))
@@ -255,7 +340,7 @@ class ForecastPipeline:
     ) -> Message:
         history = await self._load_history(db, session.id)
         messages_payload = build_chat_messages(history=history)
-        assistant_text = await client.create_text(messages_payload)
+        assistant_text = await client.create_text(messages_payload, **self._tooling)
         assistant_message = await self._create_message(
             db,
             session_id=session.id,

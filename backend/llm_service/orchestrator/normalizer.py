@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import mimetypes
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Sequence
@@ -142,13 +144,9 @@ async def _process_job(
 
 
 async def _build_image_user_message(
-    client: OpenAIResponsesClient,
+    client: OpenAIResponsesClient,  # noqa: ARG001 - reserved for future signed uploads
     chunks: Sequence[ChunkDescriptor],
 ) -> dict:
-    uploads = []
-    for chunk in chunks:
-        file_id = await client.upload_file(chunk.file_path)
-        uploads.append(file_id)
 
     chunk_map = "\n".join(
         f"- Image {idx + 1}: chunk_id={chunk.chunk_id}, upload_id={chunk.upload_id}, filename={chunk.file_path.name}"
@@ -162,8 +160,17 @@ async def _build_image_user_message(
     )
 
     content = [{"type": "text", "text": text_instruction}]
-    for file_id in uploads:
-        content.append({"type": "input_image", "image": {"file_id": file_id}})
+    for chunk in chunks:
+        mime_type = chunk.mime_type or mimetypes.guess_type(chunk.file_path.name)[0] or "application/octet-stream"
+        try:
+            data = chunk.file_path.read_bytes()
+        except OSError as exc:  # pragma: no cover
+            logger.exception("Failed to read image chunk %s", chunk.chunk_id)
+            raise HTTPException(status_code=500, detail="Failed to read uploaded image.") from exc
+
+        encoded = base64.b64encode(data).decode("ascii")
+        data_url = f"data:{mime_type};base64,{encoded}"
+        content.append({"type": "input_image", "image_url": data_url})
 
     return {"role": "user", "content": content}
 

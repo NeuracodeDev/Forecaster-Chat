@@ -4,6 +4,7 @@ import { ChevronRight, File, Loader2, Wrench } from "lucide-react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
+import type { ChatProgressStep } from "@/lib/api";
 import type { MessageRole, UploadArtifactDTO } from "@/types/chat";
 
 export interface ChatMessage {
@@ -19,9 +20,11 @@ export interface ChatMessage {
 export interface MessageListProps {
   messages: ChatMessage[];
   isLoading?: boolean;
+  progressStep?: ChatProgressStep | null;
+  progressFlow?: "file" | "chat" | null;
 }
 
-export const MessageList: React.FC<MessageListProps> = ({ messages, isLoading }) => {
+export const MessageList: React.FC<MessageListProps> = ({ messages, isLoading, progressStep, progressFlow }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const lastMessageCount = useRef(messages.length);
@@ -59,6 +62,9 @@ export const MessageList: React.FC<MessageListProps> = ({ messages, isLoading })
             Chronos is forecasting…
           </div>
         )}
+        {progressFlow && progressStep && (
+          <ProcessingSteps flow={progressFlow} activeStep={progressStep} />
+        )}
         <div ref={endRef} />
       </div>
     </ScrollArea>
@@ -95,7 +101,15 @@ const MessageBubble: React.FC<{ message: ChatMessage }> = ({ message }) => {
 
   const isUser = role === "user";
   const isAssistant = role === "assistant";
-  const sanitizedHtml = isAssistant && content ? DOMPurify.sanitize(content, { USE_PROFILES: { html: true } }) : null;
+  const enhancedContent = isAssistant && content ? formatAssistantContent(content) : null;
+  const sanitizedHtml =
+    isAssistant && enhancedContent
+      ? DOMPurify.sanitize(enhancedContent, {
+          USE_PROFILES: { html: true },
+          ADD_ATTR: ["target", "rel", "class"],
+        })
+      : null;
+  const timeLabel = new Date(createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   return (
     <div className={cn("fade-in flex w-full flex-col gap-1", isUser ? "items-end" : "items-start")}>
@@ -127,8 +141,117 @@ const MessageBubble: React.FC<{ message: ChatMessage }> = ({ message }) => {
         </div>
       </div>
       <span className="px-1 text-[10px] uppercase tracking-wider text-muted-foreground/50">
-        {pending ? "Sending…" : new Date(createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        {timeLabel}
       </span>
     </div>
   );
 };
+
+const FILE_STEPS: { id: ChatProgressStep; label: string }[] = [
+  { id: "structuring", label: "Structuring data" },
+  { id: "inference_start", label: "Starting Chronos inference" },
+  { id: "inference_complete", label: "Chronos inference complete" },
+  { id: "preparing_response", label: "Preparing final response" },
+];
+
+const CHAT_STEPS: { id: ChatProgressStep; label: string }[] = [
+  { id: "preparing_response", label: "Preparing response" },
+  { id: "reasoning", label: "Reasoning" },
+];
+
+const ProcessingSteps: React.FC<{
+  flow: "file" | "chat";
+  activeStep: ChatProgressStep;
+}> = ({ flow, activeStep }) => {
+  const steps = flow === "file" ? FILE_STEPS : CHAT_STEPS;
+  const activeIndex = Math.max(
+    steps.findIndex((step) => step.id === activeStep),
+    0,
+  );
+
+  return (
+    <div className="w-full max-w-3xl rounded-2xl border border-border/60 bg-card/60 px-5 py-4 text-xs text-muted-foreground shadow-sm">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.35em] text-muted-foreground/70">
+        {flow === "file" ? "Forecast pipeline" : "Chat response"}
+      </p>
+      <ol className="mt-3 space-y-2">
+        {steps.map((step, index) => {
+          const status = index < activeIndex ? "complete" : index === activeIndex ? "active" : "pending";
+          return (
+            <li key={step.id} className="flex items-center gap-3">
+              <span
+                className={cn(
+                  "h-2.5 w-2.5 rounded-full border border-border",
+                  status === "complete" && "bg-foreground border-foreground",
+                  status === "active" && "bg-foreground/80 border-foreground/80 animate-pulse",
+                  status === "pending" && "bg-transparent",
+                )}
+              />
+              <span
+                className={cn(
+                  "text-sm",
+                  status === "active" && "text-foreground font-medium",
+                  status === "pending" && "text-muted-foreground",
+                )}
+              >
+                {step.label}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+};
+
+const combinedLinkPattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s)<>"]+)/gi;
+
+function formatAssistantContent(text: string): string {
+  if (!text) {
+    return "";
+  }
+
+  let formatted = text.replace(combinedLinkPattern, (match: string, label: string | undefined, markdownUrl: string | undefined, plainUrl: string | undefined, offset: number, fullString: string) => {
+    // Group 1 & 2: Markdown link [label](url)
+    if (markdownUrl) {
+      return renderLinkChip(markdownUrl, label ?? markdownUrl);
+    }
+
+    // Group 3: Plain URL match
+    if (plainUrl) {
+      // Check previous character to see if we're inside an HTML attribute
+      const prevChar = offset > 0 ? fullString[offset - 1] : "";
+      // If preceded by " or ' or =, assume it's part of an HTML attribute
+      if (prevChar === '"' || prevChar === "'" || prevChar === "=") {
+        return match;
+      }
+      return renderLinkChip(plainUrl);
+    }
+
+    return match;
+  });
+
+  // Remove parentheses wrapping the link chips
+  formatted = formatted.replace(/\(\s*(<a class="chat-link-chip"[^>]*>.*?<\/a>)\s*\)/gi, "$1");
+
+  // Wrap plain text paragraphs to keep spacing consistent when original content isn't HTML
+  if (!formatted.trim().startsWith("<")) {
+    formatted = formatted
+      .split(/\n{2,}/)
+      .map((block) => `<p>${block.trim()}</p>`)
+      .join("");
+  }
+
+  return formatted;
+}
+
+function renderLinkChip(url: string, label?: string): string {
+  let display = label ?? url;
+  try {
+    const parsed = new URL(url);
+    display = label ?? parsed.hostname;
+  } catch {
+    // keep original label if URL parsing fails
+  }
+  return `<a class="chat-link-chip" href="${url}" target="_blank" rel="noopener noreferrer">${display}</a>`;
+}

@@ -42,6 +42,10 @@ def get_system_prompt() -> str:
           Date, Open, High, Low, Close, Volume, and Change %, infer the frequency, convert dates to ISO-8601,
           use “Close” as the target, and map the remaining fields into explicit past/future covariates
           (e.g., ohlc:open, ohlc:high, volume). Preserve units when known.
+        - Normalize timelines: always sort records chronologically from oldest to newest before emitting arrays.
+          If the input is descending (newest first) you MUST reverse it so Chronos sees an ascending history.
+          Validate that the final row represents the latest observation and flag any gaps or duplicated dates in issues.
+          Interpret data and frequency from the data itself, if its not csv with columns etc
         - Use the web_search tool to pull recent macro or peer signals (e.g., CPI, Fed policy, sector indices)
           that materially impact the series. Add those as clearly named covariates (e.g., "macro:cpi_yoy") and
           cite sources in the fragment issues list.

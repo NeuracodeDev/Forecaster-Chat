@@ -1,5 +1,5 @@
 import React, { useRef } from "react";
-import { ArrowUp, Paperclip, X } from "lucide-react";
+import { ArrowUp, Paperclip, Square, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -10,6 +10,7 @@ interface ChatComposerProps {
   files: File[];
   onFilesChange: (files: File[]) => void;
   onSubmit: () => void;
+  onCancel?: () => void;
   isSubmitting: boolean;
 }
 
@@ -19,6 +20,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   files,
   onFilesChange,
   onSubmit,
+  onCancel,
   isSubmitting,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -51,6 +53,8 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       handleSubmit();
     }
   };
+
+  const canSubmit = message.trim().length > 0 || files.length > 0;
 
   return (
     <form
@@ -103,17 +107,18 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
         />
 
         <Button
-          type="submit"
+          type="button"
           size="icon"
-          disabled={isSubmitting || (!message.trim() && files.length === 0)}
+          onClick={isSubmitting ? onCancel : handleSubmit}
+          disabled={!isSubmitting && !canSubmit}
           className="shrink-0 h-8 w-8 rounded-full bg-foreground text-background shadow-sm transition-all hover:bg-foreground/90 disabled:opacity-50"
         >
           {isSubmitting ? (
-            <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            <Square className="h-3.5 w-3.5" />
           ) : (
             <ArrowUp className="h-4 w-4" />
           )}
-          <span className="sr-only">Send</span>
+          <span className="sr-only">{isSubmitting ? "Cancel" : "Send"}</span>
         </Button>
       </div>
 

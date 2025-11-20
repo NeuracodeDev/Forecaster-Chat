@@ -1,11 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { AlertCircle } from "lucide-react";
 
 import "./App.css";
 import { ChatComposer } from "@/components/chat/chat-composer";
 import { MessageList, type ChatMessage } from "@/components/chat/message-list";
 import { Sidebar, type ChatSessionSummary } from "@/components/chat/sidebar";
-import { deleteSession as deleteSessionRequest, fetchSessionDetail, fetchSessions, submitChatMessage } from "@/lib/api";
+import { deleteSession as deleteSessionRequest, fetchSessionDetail, fetchSessions, submitChatMessage, type ChatProgressStep } from "@/lib/api";
 import type { ChatTurnResponse, MessageDTO, UploadArtifactDTO } from "@/types/chat";
 
 interface ChatSession {
@@ -120,6 +120,10 @@ const App: React.FC = () => {
 
   const [messageInput, setMessageInput] = useState("");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [progressStep, setProgressStep] = useState<ChatProgressStep | null>(null);
+  const [progressFlow, setProgressFlow] = useState<"file" | "chat" | null>(null);
+  const [abortController, setAbortController] = useState<AbortController | null>(null);
+  const provisionalSessionRef = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -205,6 +209,76 @@ const App: React.FC = () => {
     setPendingFiles(files);
   };
 
+  const settlePendingMessages = (sessionId: string) => {
+    if (!sessionId) {
+      return;
+    }
+    setSessions((prev) => {
+      const session = prev[sessionId];
+      if (!session) {
+        return prev;
+      }
+      const updatedMessages = session.messages.map((msg) =>
+        msg.pending ? { ...msg, pending: false } : msg,
+      );
+      return {
+        ...prev,
+        [sessionId]: {
+          ...session,
+          messages: updatedMessages,
+        },
+      };
+    });
+  };
+
+  const handleSessionEvent = useCallback(
+    (event: { sessionId: string; title: string; createdNew: boolean }) => {
+      if (event.createdNew) {
+        const provisionalId = provisionalSessionRef.current;
+        if (!provisionalId) {
+          return;
+        }
+        setSessions((prev) => {
+          const provisionalSession = prev[provisionalId];
+          if (!provisionalSession) {
+            return prev;
+          }
+          const next = { ...prev };
+          delete next[provisionalId];
+          next[event.sessionId] = {
+            ...provisionalSession,
+            id: event.sessionId,
+            title: event.title ?? provisionalSession.title,
+          };
+          return next;
+        });
+        setSessionOrder((prev) => {
+          const filtered = prev.filter((id) => id !== provisionalId && id !== event.sessionId);
+          return [event.sessionId, ...filtered];
+        });
+        setSelectedSessionId((current) => (current === provisionalId ? event.sessionId : current));
+      } else {
+        setSessions((prev) => {
+          const session = prev[event.sessionId];
+          if (!session) {
+            return prev;
+          }
+          if (!event.title || event.title === session.title) {
+            return prev;
+          }
+          return {
+            ...prev,
+            [event.sessionId]: {
+              ...session,
+              title: event.title,
+            },
+          };
+        });
+      }
+    },
+    [],
+  );
+
   const handleSubmit = async () => {
     if (!messageInput.trim() && pendingFiles.length === 0) {
       setError("Add a prompt or at least one file before sending.");
@@ -212,21 +286,26 @@ const App: React.FC = () => {
     }
 
     const trimmedMessage = messageInput.trim();
+    const filesSnapshot = pendingFiles;
     const optimisticContent =
-      trimmedMessage || (pendingFiles.length ? `Uploaded ${pendingFiles.length} file(s)` : "(no prompt)");
+      trimmedMessage || (filesSnapshot.length ? `Uploaded ${filesSnapshot.length} file(s)` : "(no prompt)");
+
+    setMessageInput("");
+    setPendingFiles([]);
+
     const optimisticMessage: ChatMessage = {
       id: `optimistic-${Date.now()}`,
       role: "user",
       content: optimisticContent,
       createdAt: new Date().toISOString(),
       pending: true,
-      uploads: pendingFiles.map(f => ({ 
-        id: `temp-${f.name}`, 
+      uploads: filesSnapshot.map((f) => ({
+        id: `temp-${f.name}`,
         original_filename: f.name,
         session_id: "",
         stored_path: "",
         extraction_status: "pending",
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
       })),
     };
     const provisionalSessionId = selectedSessionId ?? `temp-${Date.now()}`;
@@ -265,24 +344,58 @@ const App: React.FC = () => {
       setSelectedSessionId(provisionalSessionId);
     }
 
+    const isFileFlow = filesSnapshot.length > 0;
+    setProgressFlow(isFileFlow ? "file" : "chat");
+    setProgressStep(isFileFlow ? "structuring" : "preparing_response");
+    provisionalSessionRef.current = provisionalSessionId;
+
     setIsSubmitting(true);
     setError(null);
+    const controller = new AbortController();
+    setAbortController(controller);
     try {
-      const response = await submitChatMessage({
-        sessionId: selectedSessionId ?? undefined,
-        content: trimmedMessage || undefined,
-        files: pendingFiles,
-      });
+      const response = await submitChatMessage(
+        {
+          sessionId: selectedSessionId ?? undefined,
+          content: trimmedMessage || undefined,
+          files: filesSnapshot,
+        },
+        {
+          onProgress: (step) => {
+            setProgressStep(step);
+          },
+          onSession: handleSessionEvent,
+          signal: controller.signal,
+        },
+      );
       ingestResponse(response, provisionalSessionId);
-      setMessageInput("");
-      setPendingFiles([]);
     } catch (cause) {
-      const message =
-        cause instanceof Error ? cause.message : "Something went wrong while contacting the API.";
-      setError(message);
+      if (cause instanceof DOMException && cause.name === "AbortError") {
+        setError("Request cancelled.");
+      } else {
+        const message =
+          cause instanceof Error ? cause.message : "Something went wrong while contacting the API.";
+        setError(message);
+      }
+      settlePendingMessages(provisionalSessionId);
     } finally {
+      setAbortController(null);
+      setProgressStep(null);
+      setProgressFlow(null);
+      provisionalSessionRef.current = null;
       setIsSubmitting(false);
     }
+  };
+
+  const handleCancel = () => {
+    if (abortController) {
+      abortController.abort();
+    }
+    provisionalSessionRef.current = null;
+    setAbortController(null);
+    setProgressStep(null);
+    setProgressFlow(null);
+    setIsSubmitting(false);
   };
 
   const ingestResponse = (response: ChatTurnResponse, originalSessionId?: string) => {
@@ -354,6 +467,8 @@ const App: React.FC = () => {
             <div className="flex-1 min-h-0 pb-16">
               <MessageList
                 messages={activeMessages}
+                progressStep={progressStep}
+                progressFlow={progressFlow ?? undefined}
                 isLoading={isSubmitting || !!(selectedSessionId && hydratingSessions[selectedSessionId])}
               />
             </div>
@@ -376,6 +491,7 @@ const App: React.FC = () => {
               onSubmit={() => {
                 void handleSubmit();
               }}
+              onCancel={handleCancel}
               isSubmitting={isSubmitting}
             />
             {error && (

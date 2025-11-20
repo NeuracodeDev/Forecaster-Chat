@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import mimetypes
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
+from dateutil import parser as date_parser
 from fastapi import HTTPException, status
 
 from core.configs.llm_config import (
@@ -118,6 +121,33 @@ def _chunk_pdf(artifact: UploadArtifact, path: Path, mime_type: str) -> List[Chu
     return chunks
 
 
+def _detect_date_column(header_line: str) -> int:
+    try:
+        fields = next(csv.reader([header_line]))
+    except Exception:
+        return 0
+    for idx, field in enumerate(fields):
+        if "date" in field.strip().lower():
+            return idx
+    return 0
+
+
+def _parse_row_date(row_line: str, date_idx: int) -> Optional[datetime]:
+    try:
+        values = next(csv.reader([row_line]))
+    except Exception:
+        return None
+    if date_idx >= len(values):
+        return None
+    candidate = values[date_idx].strip()
+    if not candidate:
+        return None
+    try:
+        return date_parser.parse(candidate, fuzzy=True)
+    except (ValueError, TypeError):
+        return None
+
+
 def _chunk_csv(artifact: UploadArtifact, path: Path, mime_type: str) -> List[ChunkDescriptor]:
     with path.open("r", encoding="utf-8", errors="ignore") as fh:
         lines = [line.rstrip("\n") for line in fh if line.rstrip("\n")]
@@ -127,6 +157,20 @@ def _chunk_csv(artifact: UploadArtifact, path: Path, mime_type: str) -> List[Chu
 
     header = lines[0]
     rows = lines[1:]
+    date_idx = _detect_date_column(header)
+    first_row_date = _parse_row_date(rows[0], date_idx) if rows else None
+    last_row_date = _parse_row_date(rows[-1], date_idx) if rows else None
+    if first_row_date and last_row_date and first_row_date > last_row_date:
+        rows = list(reversed(rows))
+        first_row_date, last_row_date = last_row_date, first_row_date
+        logger.info(
+            "file_processor.chunk_csv.reordered_rows",
+            extra={
+                "upload_id": str(artifact.id),
+                "path": str(path),
+                "date_column_index": date_idx,
+            },
+        )
     chunks: List[ChunkDescriptor] = []
 
     for idx in range(0, len(rows), CSV_ROWS_PER_CHUNK):
@@ -157,6 +201,8 @@ def _chunk_csv(artifact: UploadArtifact, path: Path, mime_type: str) -> List[Chu
         "path": str(path),
         "chunk_count": len(chunks),
         "total_rows": len(rows),
+            "first_row_date": first_row_date.isoformat() if first_row_date else None,
+            "last_row_date": last_row_date.isoformat() if last_row_date else None,
         },
     )
     return chunks

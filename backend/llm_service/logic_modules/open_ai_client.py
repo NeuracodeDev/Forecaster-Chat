@@ -146,7 +146,7 @@ class OpenAIResponsesClient:
 
         await self._client.close()
 
-    async def upload_file(self, path: Path, *, purpose: str = "responses") -> str:
+    async def upload_file(self, path: Path, *, purpose: str = "vision") -> str:
         """Upload a local file to OpenAI and return the file_id."""
 
         with path.open("rb") as handle:

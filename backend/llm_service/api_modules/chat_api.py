@@ -6,7 +6,9 @@ import shutil
 from typing import List, Sequence
 from uuid import UUID, uuid4
 
+import json
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,13 +37,13 @@ pipeline = ForecastPipeline()
 logger = logging.getLogger(__name__)
 
 
-@router.post("/message", response_model=ChatTurnResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/message", status_code=status.HTTP_200_OK)
 async def submit_message(
     session_id: UUID | None = Form(default=None),
     content: str | None = Form(default=None),
     files: List[UploadFile] | None = File(default=None),
     db: AsyncSession = Depends(get_session),
-) -> ChatTurnResponse:
+) -> StreamingResponse:
     logger.info(
         "chat_api.submit_message.start",
         extra={
@@ -88,45 +90,70 @@ async def submit_message(
         "chat_api.pipeline.run.start",
         extra={"session_id": str(session.id), "message_id": str(user_message.id), "upload_count": len(uploads)},
     )
-    result = await pipeline.run(db, session, user_message, uploads)
 
-    assistant = await _get_message(db, result["assistant_message_id"])
+    async def event_generator():
+        # Yield initial session info immediately
+        yield f"data: {json.dumps({'type': 'session', 'session_id': str(session.id), 'title': session.title, 'created_new': created_new_session})}\n\n"
+        try:
+            async for event in pipeline.run_generator(db, session, user_message, uploads):
+                if event["status"] == "done":
+                    # Finalize response construction
+                    data = event["data"]
+                    assistant_id = data["assistant_message_id"]
+                    assistant = await _get_message(db, assistant_id)
+                    
+                    tool_messages = []
+                    if "tool_message_id" in data:
+                        tool_messages.append(await _get_message(db, data["tool_message_id"]))
+                    if "raw_tool_message_id" in data:
+                        tool_messages.append(await _get_message(db, data["raw_tool_message_id"]))
 
-    tool_messages: List[Message] = []
-    if "tool_message_id" in result:
-        tool_messages.append(await _get_message(db, result["tool_message_id"]))
-    if "raw_tool_message_id" in result:
-        tool_messages.append(await _get_message(db, result["raw_tool_message_id"]))
+                    chronos_response = None
+                    forecast_job_id = data.get("forecast_job_id")
+                    for message in tool_messages:
+                        payload = message.raw_payload or {}
+                        if chronos_response is None:
+                            chronos_response = payload.get("chronos_response")
 
-    chronos_response = None
-    forecast_job_id = result.get("forecast_job_id")
-    for message in tool_messages:
-        payload = message.raw_payload or {}
-        if chronos_response is None:
-            chronos_response = payload.get("chronos_response")
+                    for upload in uploads:
+                        await db.refresh(upload)
 
-    for upload in uploads:
-        await db.refresh(upload)
+                    await db.refresh(session)
 
-    await db.refresh(session)
-    
-    logger.info(f"chat_api.session_title_before_response session_id={session.id} title={session.title} created_new={created_new_session}")
+                    response_dto = ChatTurnResponse(
+                        session_id=session.id,
+                        session_title=session.title,
+                        created_new_session=created_new_session,
+                        user_message=_serialize_message(user_message),
+                        assistant_message=_serialize_message(assistant),
+                        tool_messages=[_serialize_message(msg) for msg in tool_messages],
+                        uploads=[_serialize_upload(artifact) for artifact in uploads],
+                        forecast_job_id=UUID(forecast_job_id) if forecast_job_id else None,
+                        chronos_response=chronos_response,
+                    )
+                    logger.info(
+                        "chat_api.submit_message.completed",
+                        extra={
+                            "session_id": str(session.id),
+                            "user_message_id": str(user_message.id),
+                            "assistant_message_id": str(assistant.id),
+                            "tool_count": len(tool_messages),
+                            "upload_count": len(uploads),
+                            "forecast_job_id": data.get("forecast_job_id"),
+                        },
+                    )
+                    yield f"data: {json.dumps({'type': 'result', 'payload': response_dto.model_dump(mode='json')})}\n\n"
+                else:
+                    # Progress event
+                    yield f"data: {json.dumps({'type': 'progress', 'step': event['status']})}\n\n"
+        except HTTPException as exc:
+            logger.exception("pipeline.stream.failed", extra={"session_id": str(session.id)})
+            yield f"data: {json.dumps({'type': 'error', 'message': exc.detail})}\n\n"
+        except Exception as exc:  # pragma: no cover
+            logger.exception("pipeline.stream.failed", extra={"session_id": str(session.id)})
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Internal error during processing.'})}\n\n"
 
-    response = ChatTurnResponse(
-        session_id=session.id,
-        session_title=session.title,
-        created_new_session=created_new_session,
-        user_message=_serialize_message(user_message),
-        assistant_message=_serialize_message(assistant),
-        tool_messages=[_serialize_message(msg) for msg in tool_messages],
-        uploads=[_serialize_upload(artifact) for artifact in uploads],
-        forecast_job_id=UUID(forecast_job_id) if forecast_job_id else None,
-        chronos_response=chronos_response,
-    )
-
-    logger.info(f"chat_api.submit_message.completed session_id={session.id} session_title={session.title} user_message_id={user_message.id} assistant_message_id={assistant.id} tool_count={len(tool_messages)} upload_count={len(uploads)} forecast_job_id={result.get('forecast_job_id')}")
-
-    return response
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.get("/sessions", response_model=List[SessionSummaryDTO], status_code=status.HTTP_200_OK)
