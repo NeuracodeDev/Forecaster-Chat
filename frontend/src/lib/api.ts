@@ -4,7 +4,8 @@ import type {
   SessionSummaryDTO,
 } from "@/types/chat";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "/api/v1";
+const { VITE_API_BASE } = import.meta.env;
+const API_BASE: string = typeof VITE_API_BASE === "string" && VITE_API_BASE.length > 0 ? VITE_API_BASE : "/api/v1";
 
 export interface SubmitChatPayload {
   sessionId?: string;
@@ -36,7 +37,7 @@ export async function submitChatMessage({
     throw new Error(text || "Failed to submit chat message.");
   }
 
-  return response.json();
+  return (await response.json()) as ChatTurnResponse;
 }
 
 export async function fetchSessions(): Promise<SessionSummaryDTO[]> {
@@ -47,7 +48,7 @@ export async function fetchSessions(): Promise<SessionSummaryDTO[]> {
     const text = await response.text();
     throw new Error(text || "Failed to fetch sessions.");
   }
-  return response.json();
+  return (await response.json()) as SessionSummaryDTO[];
 }
 
 export async function fetchSessionDetail(sessionId: string): Promise<SessionDetailResponse> {
@@ -58,6 +59,16 @@ export async function fetchSessionDetail(sessionId: string): Promise<SessionDeta
     const text = await response.text();
     throw new Error(text || "Failed to fetch session.");
   }
-  return response.json();
+  return (await response.json()) as SessionDetailResponse;
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/chat/session/${sessionId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || "Failed to delete session.");
+  }
 }
 

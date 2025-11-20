@@ -12,7 +12,7 @@ backend/.pytest_cache/
 backend/.ruff_cache/
 backend/.env
 backend/.venv/
-
+node_modules/
 # Frontend artifacts
 frontend/node_modules/
 frontend/dist/

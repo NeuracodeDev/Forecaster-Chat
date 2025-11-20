@@ -3,7 +3,6 @@ import { ArrowUp, Paperclip, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { cn } from "@/lib/utils";
 
 interface ChatComposerProps {
   message: string;
@@ -55,17 +54,15 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
 
   return (
     <form
-      className="mx-auto w-full max-w-3xl px-4 py-4"
+      className="mx-auto w-full max-w-3xl"
       onSubmit={handleSubmit}
     >
       {files.length > 0 && (
-        <div className="mb-3 flex flex-wrap gap-2">
+        <div className="mb-2 flex flex-wrap gap-2 px-2">
           {files.map((file, index) => (
             <span
               key={`${file.name}-${index}`}
-              className={cn(
-                "inline-flex items-center gap-2 rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-foreground shadow-sm",
-              )}
+              className="inline-flex items-center gap-2 rounded-lg border border-border bg-background/50 backdrop-blur-sm px-2 py-1 text-[10px] font-medium text-foreground shadow-sm"
             >
               <span className="max-w-[150px] truncate">{file.name}</span>
               <button
@@ -80,15 +77,15 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
         </div>
       )}
 
-      <div className="relative flex items-end gap-2 rounded-3xl border border-input bg-background p-2 shadow-sm transition-colors focus-within:border-ring/30 focus-within:ring-1 focus-within:ring-ring/30">
+      <div className="relative flex items-end gap-1.5 rounded-[26px] border border-black/20 bg-background/45 backdrop-blur-2xl p-1.5 shadow-sm transition-all focus-within:bg-background/65 hover:bg-background/55">
         <Button
           type="button"
           variant="ghost"
           size="icon"
-          className="h-10 w-10 shrink-0 rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="h-8 w-8 shrink-0 rounded-full text-muted-foreground hover:bg-muted/30 hover:text-foreground transition-colors"
           onClick={() => fileInputRef.current?.click()}
         >
-          <Paperclip className="h-5 w-5" />
+          <Paperclip className="h-4 w-4" />
           <span className="sr-only">Attach</span>
         </Button>
 
@@ -101,7 +98,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           }}
           onKeyDown={handleKeyDown}
           placeholder="Message Chronos..."
-          className="min-h-[40px] max-h-[200px] flex-1 resize-none border-0 bg-transparent px-2 py-2.5 shadow-none focus-visible:ring-0 text-sm leading-relaxed"
+          className="min-h-[20px] max-h-[200px] flex-1 resize-none border-0 bg-transparent px-2 py-2 shadow-none focus-visible:ring-0 text-sm leading-normal placeholder:text-muted-foreground/50"
           rows={1}
         />
 
@@ -109,20 +106,16 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           type="submit"
           size="icon"
           disabled={isSubmitting || (!message.trim() && files.length === 0)}
-          className="shrink-0 rounded-full bg-foreground text-background shadow-sm transition-all hover:bg-foreground/90 disabled:opacity-60"
+          className="shrink-0 h-8 w-8 rounded-full bg-foreground text-background shadow-sm transition-all hover:bg-foreground/90 disabled:opacity-50"
         >
           {isSubmitting ? (
-            <span className="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
           ) : (
-            <ArrowUp className="h-6 w-6" />
+            <ArrowUp className="h-4 w-4" />
           )}
           <span className="sr-only">Send</span>
         </Button>
       </div>
-
-      <p className="mt-3 text-center text-[10px] text-muted-foreground">
-        Supports CSV, TSV, JSON, TXT, PDF, and up to 20 images per turn.
-      </p>
 
       <input
         ref={fileInputRef}

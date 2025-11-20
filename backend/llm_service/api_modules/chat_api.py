@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import shutil
 from typing import List, Sequence
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.session import get_session
+from chronos_service.models_modules import ForecastJob
 from llm_service.logic_modules.open_ai_client import OpenAIResponsesClient
 from llm_service.logic_modules.title_generator import generate_chat_title
 from llm_service.models_modules.sessions import (
@@ -194,6 +196,28 @@ async def get_session_detail(
     )
 
 
+@router.delete("/session/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: UUID,
+    db: AsyncSession = Depends(get_session),
+) -> None:
+    session = await db.get(ConversationSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation session not found.")
+
+    logger.info("chat_api.delete_session.start", extra={"session_id": str(session_id)})
+
+    await db.execute(delete(ForecastJob).where(ForecastJob.session_id == session_id))
+    await db.delete(session)
+    await db.commit()
+
+    storage_dir = STORAGE_ROOT / str(session_id)
+    if storage_dir.exists():
+        shutil.rmtree(storage_dir, ignore_errors=True)
+
+    logger.info("chat_api.delete_session.completed", extra={"session_id": str(session_id)})
+
+
 async def _store_uploads(
     db: AsyncSession,
     session_id: UUID,
@@ -249,12 +273,12 @@ async def _ensure_session_title(
     if session.title:
         return
 
-    stripped = (content or "").strip()
-    if stripped:
+    title_context = _compose_title_context(content, files)
+    if title_context:
         async with OpenAIResponsesClient() as client:
             session.title = await generate_chat_title(
                 client=client,
-                first_user_message=stripped,
+                first_user_message=title_context,
             )
         db.add(session)
         await db.flush()
@@ -273,6 +297,17 @@ def _derive_upload_title(files: Sequence[UploadFile]) -> str | None:
         if filename:
             return filename[:120]
     return None
+
+
+def _compose_title_context(content: str | None, files: Sequence[UploadFile]) -> str:
+    parts: List[str] = []
+    stripped = (content or "").strip()
+    if stripped:
+        parts.append(stripped)
+    if files:
+        file_list = ", ".join(Path(upload.filename or "upload").stem for upload in files[:5])
+        parts.append(f"Files: {file_list}")
+    return "\n".join(parts).strip()
 
 
 async def _get_message(db: AsyncSession, message_id: str | UUID) -> Message:

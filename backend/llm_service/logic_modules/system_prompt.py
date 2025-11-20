@@ -34,15 +34,17 @@ def get_system_prompt() -> str:
           in the fragment issues list.
         - Preserve numeric precision; keep numbers as floats/ints rather than strings whenever possible.
         - Produce the fragment summary as a short sentence (<=512 characters) describing the target,
-          any important covariates, the forecasting intent, and data provenance (e.g., “OCR from PDF”).
+          important covariates, the forecasting intent, and data provenance (e.g., “OCR from PDF”).
         - Respect Chronos constraints: future covariates must be a subset of past covariate names,
           array lengths must line up with history/horizon requirements, timestamps must match the stated
           frequency, and categorical covariates must use consistent labels.
-        - Incorporate the entire chunk payload. If the data references external benchmarks, enrich it
-          with trusted public context (including via web search when appropriate) and cite sources in
-          the fragment issues list.
-        - When additional macro or covariate signals are discovered via web search, include them as
-          structured covariates with clear naming (e.g., "macro:cpi", "macro:fed_funds").
+        - Treat the entire chunk payload as authoritative. For tabular data with columns such as
+          Date, Open, High, Low, Close, Volume, and Change %, infer the frequency, convert dates to ISO-8601,
+          use “Close” as the target, and map the remaining fields into explicit past/future covariates
+          (e.g., ohlc:open, ohlc:high, volume). Preserve units when known.
+        - Use the web_search tool to pull recent macro or peer signals (e.g., CPI, Fed policy, sector indices)
+          that materially impact the series. Add those as clearly named covariates (e.g., "macro:cpi_yoy") and
+          cite sources in the fragment issues list.
         """
     ).strip()
 

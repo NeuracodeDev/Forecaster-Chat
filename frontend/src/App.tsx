@@ -5,13 +5,8 @@ import "./App.css";
 import { ChatComposer } from "@/components/chat/chat-composer";
 import { MessageList, type ChatMessage } from "@/components/chat/message-list";
 import { Sidebar, type ChatSessionSummary } from "@/components/chat/sidebar";
-import { fetchSessionDetail, fetchSessions, submitChatMessage } from "@/lib/api";
-import type {
-  ChatTurnResponse,
-  MessageDTO,
-  SessionSummaryDTO,
-  UploadArtifactDTO,
-} from "@/types/chat";
+import { deleteSession as deleteSessionRequest, fetchSessionDetail, fetchSessions, submitChatMessage } from "@/lib/api";
+import type { ChatTurnResponse, MessageDTO, UploadArtifactDTO } from "@/types/chat";
 
 interface ChatSession {
   id: string;
@@ -31,6 +26,7 @@ const App: React.FC = () => {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [hydratingSessions, setHydratingSessions] = useState<Record<string, boolean>>({});
   const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [deletingSessions, setDeletingSessions] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -100,7 +96,7 @@ const App: React.FC = () => {
             [sessionId]: {
               ...existing,
               title: detail.session_title ?? existing.title,
-              messages: detail.messages.map(toChatMessage),
+              messages: detail.messages.map((msg) => toChatMessage(msg, detail.uploads)),
               uploads: detail.uploads,
               lastUpdated: detail.updated_at ?? existing.lastUpdated,
               createdAt: detail.created_at ?? existing.createdAt,
@@ -157,6 +153,48 @@ const App: React.FC = () => {
     handleSelectSession(null);
   };
 
+  const handleDeleteSession = async (sessionId: string) => {
+    if (!sessionId) {
+      return;
+    }
+    if (!window.confirm("Delete this conversation permanently? This cannot be undone.")) {
+      return;
+    }
+    setDeletingSessions((prev) => ({ ...prev, [sessionId]: true }));
+    setError(null);
+    try {
+      await deleteSessionRequest(sessionId);
+      setSessions((prev) => {
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
+      setSessionOrder((prev) => {
+        const filtered = prev.filter((id) => id !== sessionId);
+        if (selectedSessionId === sessionId) {
+          setSelectedSessionId(filtered[0] ?? null);
+          setMessageInput("");
+          setPendingFiles([]);
+        }
+        return filtered;
+      });
+      setHydratingSessions((prev) => {
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "Failed to delete session.";
+      setError(message);
+    } finally {
+      setDeletingSessions((prev) => {
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
+    }
+  };
+
   const handleFilesChange = (files: File[]) => {
     const imageCount = files.filter((file) => file.type.startsWith("image/")).length;
     if (imageCount > 20) {
@@ -173,15 +211,69 @@ const App: React.FC = () => {
       return;
     }
 
+    const trimmedMessage = messageInput.trim();
+    const optimisticContent =
+      trimmedMessage || (pendingFiles.length ? `Uploaded ${pendingFiles.length} file(s)` : "(no prompt)");
+    const optimisticMessage: ChatMessage = {
+      id: `optimistic-${Date.now()}`,
+      role: "user",
+      content: optimisticContent,
+      createdAt: new Date().toISOString(),
+      pending: true,
+      uploads: pendingFiles.map(f => ({ 
+        id: `temp-${f.name}`, 
+        original_filename: f.name,
+        session_id: "",
+        stored_path: "",
+        extraction_status: "pending",
+        created_at: new Date().toISOString()
+      })),
+    };
+    const provisionalSessionId = selectedSessionId ?? `temp-${Date.now()}`;
+    const nowIso = new Date().toISOString();
+
+    setSessions((prev) => {
+      const existing = prev[provisionalSessionId];
+      if (existing) {
+        return {
+          ...prev,
+          [provisionalSessionId]: {
+            ...existing,
+            messages: [...existing.messages, optimisticMessage],
+            lastUpdated: nowIso,
+          },
+        };
+      }
+      const fallbackTitle = deriveSessionTitle(trimmedMessage, []);
+      return {
+        ...prev,
+        [provisionalSessionId]: {
+          id: provisionalSessionId,
+          title: fallbackTitle || "New conversation",
+          messages: [optimisticMessage],
+          uploads: [],
+          chronosResponse: null,
+          forecastJobId: null,
+          lastUpdated: nowIso,
+          createdAt: nowIso,
+          isHydrated: false,
+        },
+      };
+    });
+    setSessionOrder((prev) => [provisionalSessionId, ...prev.filter((id) => id !== provisionalSessionId)]);
+    if (!selectedSessionId) {
+      setSelectedSessionId(provisionalSessionId);
+    }
+
     setIsSubmitting(true);
     setError(null);
     try {
       const response = await submitChatMessage({
         sessionId: selectedSessionId ?? undefined,
-        content: messageInput.trim() || undefined,
+        content: trimmedMessage || undefined,
         files: pendingFiles,
       });
-      ingestResponse(response);
+      ingestResponse(response, provisionalSessionId);
       setMessageInput("");
       setPendingFiles([]);
     } catch (cause) {
@@ -193,40 +285,51 @@ const App: React.FC = () => {
     }
   };
 
-  const ingestResponse = (response: ChatTurnResponse) => {
+  const ingestResponse = (response: ChatTurnResponse, originalSessionId?: string) => {
     const sessionId = response.session_id;
 
+    // Filter uploads that belong to the user message we just sent
+    // This is a heuristic since the API response separates message and uploads
+    // but we want to display them together in the bubble.
+    const userUploads = response.uploads.filter(u => u.message_id === response.user_message.id);
+
     const messageBundle: ChatMessage[] = [
-      toChatMessage(response.user_message),
-      ...response.tool_messages.map(toChatMessage),
-      toChatMessage(response.assistant_message),
+      toChatMessage(response.user_message, userUploads),
+      ...response.tool_messages.map(msg => toChatMessage(msg, [])),
+      toChatMessage(response.assistant_message, []),
     ];
 
     setSessions((prev) => {
-      const existing = prev[sessionId];
+      const nextSessions = { ...prev };
+      const original = originalSessionId ? nextSessions[originalSessionId] : undefined;
+      if (originalSessionId && originalSessionId !== sessionId) {
+        delete nextSessions[originalSessionId];
+      }
+      const existing = nextSessions[sessionId] ?? original;
       const fallbackTitle = deriveSessionTitle(response.user_message.content ?? undefined, response.uploads);
       const sessionTitle = response.session_title ?? existing?.title ?? fallbackTitle;
-      const nextMessages = existing ? [...existing.messages, ...messageBundle] : messageBundle;
+      
+      const committedMessages = existing ? existing.messages.filter((msg) => !msg.pending) : [];
+      const nextMessages = [...committedMessages, ...messageBundle];
+      
       const nowIso = new Date().toISOString();
 
-      return {
-        ...prev,
-        [sessionId]: {
-          id: sessionId,
-          title: sessionTitle,
-          messages: nextMessages,
-          uploads: response.uploads,
-          chronosResponse: response.chronos_response ?? existing?.chronosResponse ?? null,
-          forecastJobId: response.forecast_job_id ?? existing?.forecastJobId ?? null,
-          lastUpdated: nowIso,
-          createdAt: existing?.createdAt ?? nowIso,
-          isHydrated: true,
-        },
+      nextSessions[sessionId] = {
+        id: sessionId,
+        title: sessionTitle,
+        messages: nextMessages,
+        uploads: response.uploads,
+        chronosResponse: response.chronos_response ?? existing?.chronosResponse ?? null,
+        forecastJobId: response.forecast_job_id ?? existing?.forecastJobId ?? null,
+        lastUpdated: nowIso,
+        createdAt: existing?.createdAt ?? nowIso,
+        isHydrated: true,
       };
+      return nextSessions;
     });
 
     setSessionOrder((prev) => {
-      const filtered = prev.filter((id) => id !== sessionId);
+      const filtered = prev.filter((id) => id !== sessionId && id !== originalSessionId);
       return [sessionId, ...filtered];
     });
 
@@ -240,39 +343,49 @@ const App: React.FC = () => {
         selectedSessionId={selectedSessionId}
         onSelectSession={handleSelectSession}
         onCreateSession={handleCreateSession}
+        onDeleteSession={(sessionId) => {
+          void handleDeleteSession(sessionId);
+        }}
+        deletingSessions={deletingSessions}
       />
-      <main className="flex h-full flex-1 flex-col bg-background">
-        <div className="flex-1 overflow-hidden px-12 py-10">
-          <div className="flex h-full w-full flex-col">
-            {activeSession ? (
+      <main className="relative flex h-full flex-1 flex-col bg-background overflow-hidden">
+        <div className="flex-1 min-h-0 flex flex-col">
+          {activeSession ? (
+            <div className="flex-1 min-h-0 pb-16">
               <MessageList
                 messages={activeMessages}
                 isLoading={isSubmitting || !!(selectedSessionId && hydratingSessions[selectedSessionId])}
               />
-            ) : sessionsLoading ? (
-              <LoadingState />
-            ) : (
+            </div>
+          ) : sessionsLoading ? (
+            <LoadingState />
+          ) : (
+            <div className="flex-1 flex flex-col justify-center overflow-y-auto px-12 pb-16">
               <EmptyState />
+            </div>
+          )}
+        </div>
+
+        <div className="pointer-events-none absolute bottom-6 left-0 right-0 z-10 flex justify-center">
+          <div className="pointer-events-auto w-full max-w-3xl px-4">
+            <ChatComposer
+              message={messageInput}
+              onMessageChange={setMessageInput}
+              files={pendingFiles}
+              onFilesChange={handleFilesChange}
+              onSubmit={() => {
+                void handleSubmit();
+              }}
+              isSubmitting={isSubmitting}
+            />
+            {error && (
+              <div className="mx-auto mt-2 flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-2 text-xs text-destructive">
+                <AlertCircle className="h-3.5 w-3.5" />
+                <span>{error}</span>
+              </div>
             )}
           </div>
         </div>
-        {activeSession?.isHydrated && activeSession.uploads?.length ? (
-          <UploadInspector uploads={activeSession.uploads} />
-        ) : null}
-        <ChatComposer
-          message={messageInput}
-          onMessageChange={setMessageInput}
-          files={pendingFiles}
-          onFilesChange={handleFilesChange}
-          onSubmit={handleSubmit}
-          isSubmitting={isSubmitting}
-        />
-        {error && (
-          <div className="flex items-center gap-2 border-t border-destructive/50 bg-destructive/10 px-10 py-4 text-sm text-destructive">
-            <AlertCircle className="h-4 w-4" />
-            <span>{error}</span>
-          </div>
-        )}
       </main>
     </div>
   );
@@ -286,7 +399,7 @@ const LoadingState: React.FC = () => (
 );
 
 const EmptyState: React.FC = () => (
-  <div className="flex h-full flex-col justify-center gap-12">
+  <div className="flex flex-col gap-12">
     <div className="space-y-4 text-center">
       <p className="text-[11px] uppercase tracking-[0.4em] text-muted-foreground">Forecaster</p>
       <h2 className="text-4xl font-semibold text-foreground">Start a new Chronos conversation</h2>
@@ -325,44 +438,13 @@ const EmptyState: React.FC = () => (
   </div>
 );
 
-const UploadInspector: React.FC<{ uploads: UploadArtifactDTO[] }> = ({ uploads }) => (
-  <div className="border-t border-border bg-panel px-12 py-6">
-    <div className="flex items-center justify-between">
-      <div>
-        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Uploaded files</p>
-        <p className="text-xs text-muted-foreground">Metadata stored, originals discarded.</p>
-      </div>
-      <span className="rounded-full bg-muted px-3 py-1 text-xs font-medium text-muted-foreground">
-        {uploads.length} file{uploads.length === 1 ? "" : "s"}
-      </span>
-    </div>
-    <div className="mt-4 grid gap-3 md:grid-cols-2">
-      {uploads.map((upload) => (
-        <div
-          key={upload.id}
-          className="flex items-center justify-between rounded-2xl border border-border bg-card px-4 py-3 text-sm shadow-sm"
-        >
-          <div>
-            <p className="font-medium text-foreground">{upload.original_filename}</p>
-            <p className="text-xs uppercase tracking-wide text-muted-foreground">{upload.extraction_status}</p>
-          </div>
-          {typeof upload.size_bytes === "number" && (
-            <span className="text-xs text-muted-foreground">
-              {(upload.size_bytes / 1024).toFixed(1)} KB
-            </span>
-          )}
-        </div>
-      ))}
-    </div>
-  </div>
-);
-
-const toChatMessage = (dto: MessageDTO): ChatMessage => ({
+const toChatMessage = (dto: MessageDTO, allUploads: UploadArtifactDTO[]): ChatMessage => ({
   id: dto.id,
   role: dto.role,
   content: dto.content ?? "",
   rawPayload: dto.raw_payload ?? undefined,
   createdAt: dto.created_at,
+  uploads: allUploads.filter(u => u.message_id === dto.id),
 });
 
 const deriveSessionTitle = (

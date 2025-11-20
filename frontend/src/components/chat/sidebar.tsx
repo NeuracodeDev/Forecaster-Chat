@@ -1,4 +1,5 @@
-import { ListFilter, Plus, SquarePen } from "lucide-react";
+import React from "react";
+import { Loader2, Plus, SquarePen, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -15,6 +16,8 @@ interface SidebarProps {
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string | null) => void;
   onCreateSession: () => void;
+  onDeleteSession: (sessionId: string) => void;
+  deletingSessions: Record<string, boolean>;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -22,6 +25,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   selectedSessionId,
   onSelectSession,
   onCreateSession,
+  onDeleteSession,
+  deletingSessions,
 }) => {
   return (
     <aside className="flex h-full w-64 flex-col border-r border-sidebar-border bg-sidebar px-4 py-4 text-sidebar-foreground">
@@ -51,12 +56,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           ) : (
             sessions.map((session) => (
-              <button
+              <div
                 key={session.id}
-                type="button"
+                role="button"
+                tabIndex={0}
                 onClick={() => onSelectSession(session.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelectSession(session.id);
+                  }
+                }}
                 className={cn(
-                  "flex w-full flex-col rounded-lg border px-3 py-2 text-left transition-colors",
+                  "flex w-full flex-col rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
                   selectedSessionId === session.id
                     ? "border-sidebar-ring bg-sidebar-accent"
                     : "border-transparent hover:bg-sidebar-accent/70",
@@ -66,10 +78,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <SquarePen className="h-4 w-4 text-muted-foreground" />
                   <span className="truncate">{session.title}</span>
                 </span>
-                <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                  {formatRelativeTime(session.lastUpdated)}
-                </span>
-              </button>
+                <div className="mt-1 flex items-center justify-between text-[11px] uppercase tracking-wide text-muted-foreground">
+                  <span>{formatRelativeTime(session.lastUpdated)}</span>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="h-6 w-6 rounded-full text-muted-foreground hover:text-destructive"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onDeleteSession(session.id);
+                    }}
+                    disabled={deletingSessions[session.id]}
+                  >
+                    {deletingSessions[session.id] ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-3.5 w-3.5" />
+                    )}
+                    <span className="sr-only">Delete session</span>
+                  </Button>
+                </div>
+              </div>
             ))
           )}
         </nav>
