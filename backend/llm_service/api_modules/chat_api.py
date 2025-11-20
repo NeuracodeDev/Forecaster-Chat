@@ -82,6 +82,7 @@ async def submit_message(
 
     if created_new_session:
         await _ensure_session_title(db, session, content=content, files=files)
+        logger.info(f"chat_api.session_title_after_ensure session_id={session.id} title={session.title}")
 
     logger.info(
         "chat_api.pipeline.run.start",
@@ -107,6 +108,10 @@ async def submit_message(
     for upload in uploads:
         await db.refresh(upload)
 
+    await db.refresh(session)
+    
+    logger.info(f"chat_api.session_title_before_response session_id={session.id} title={session.title} created_new={created_new_session}")
+
     response = ChatTurnResponse(
         session_id=session.id,
         session_title=session.title,
@@ -119,17 +124,7 @@ async def submit_message(
         chronos_response=chronos_response,
     )
 
-    logger.info(
-        "chat_api.submit_message.completed",
-        extra={
-            "session_id": str(session.id),
-            "user_message_id": str(user_message.id),
-            "assistant_message_id": str(assistant.id),
-            "tool_count": len(tool_messages),
-            "upload_count": len(uploads),
-            "forecast_job_id": result.get("forecast_job_id"),
-        },
-    )
+    logger.info(f"chat_api.submit_message.completed session_id={session.id} session_title={session.title} user_message_id={user_message.id} assistant_message_id={assistant.id} tool_count={len(tool_messages)} upload_count={len(uploads)} forecast_job_id={result.get('forecast_job_id')}")
 
     return response
 
@@ -270,25 +265,37 @@ async def _ensure_session_title(
     content: str | None,
     files: Sequence[UploadFile],
 ) -> None:
+    logger.info(f"chat_api.ensure_session_title.start session_id={session.id} has_existing_title={bool(session.title)} existing_title={session.title} has_content={bool(content)} file_count={len(files)}")
+
     if session.title:
+        logger.info(f"chat_api.ensure_session_title.skip_existing session_id={session.id} title={session.title}")
         return
 
     title_context = _compose_title_context(content, files)
+    logger.info(f"chat_api.ensure_session_title.context_composed session_id={session.id} context_length={len(title_context)} context_preview={title_context[:100]}")
+
     if title_context:
         async with OpenAIResponsesClient() as client:
-            session.title = await generate_chat_title(
+            generated_title = await generate_chat_title(
                 client=client,
                 first_user_message=title_context,
             )
+            logger.info(f"chat_api.ensure_session_title.generated session_id={session.id} generated_title={generated_title}")
+            session.title = generated_title
         db.add(session)
         await db.flush()
+        await db.refresh(session)
+        logger.info(f"chat_api.ensure_session_title.persisted session_id={session.id} final_title={session.title}")
         return
 
     fallback = _derive_upload_title(files)
     if fallback:
+        logger.info(f"chat_api.ensure_session_title.fallback session_id={session.id} fallback_title={fallback}")
         session.title = fallback
         db.add(session)
         await db.flush()
+    else:
+        logger.warning(f"chat_api.ensure_session_title.no_title session_id={session.id}")
 
 
 def _derive_upload_title(files: Sequence[UploadFile]) -> str | None:

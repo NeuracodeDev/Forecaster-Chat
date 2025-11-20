@@ -9,7 +9,7 @@ from llm_service.logic_modules.open_ai_client import OpenAIResponsesClient
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_CHARS = 48
-DEFAULT_MAX_OUTPUT_TOKENS = 64
+DEFAULT_MAX_OUTPUT_TOKENS = 64000
 
 TITLE_SYSTEM_PROMPT = """\
 You are ChronosTitle, a precise assistant that condenses a user's first message into a
@@ -20,6 +20,7 @@ Constraints:
 - No quotation marks, emojis, numbering, or trailing punctuation.
 - Summarize the user's goal or dataset focus directly.
 - Title-case the result (capitalize principal words).
+Output only the title text. Do not explain your reasoning.
 """
 
 
@@ -67,8 +68,11 @@ async def generate_chat_title(
         Upper bound for the returned title length.
     """
 
+    logger.info(f"title_generator.generate_chat_title.start message_length={len(first_user_message)} max_chars={max_chars} model={TITLE_MODEL_NAME}")
+
     stripped_message = first_user_message.strip()
     if not stripped_message:
+        logger.info("title_generator.generate_chat_title.empty_message")
         return "New conversation"
 
     messages: Sequence[dict[str, str]] = [
@@ -77,17 +81,23 @@ async def generate_chat_title(
     ]
 
     try:
+        logger.info(f"title_generator.generate_chat_title.calling_llm model={TITLE_MODEL_NAME} message_count={len(messages)}")
         raw_title = await client.create_text(
             messages,
             model_name=TITLE_MODEL_NAME,
             reasoning_effort=None,
             max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
         )
+        logger.info(f"title_generator.generate_chat_title.llm_response raw_title={raw_title} raw_length={len(raw_title)}")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("title generation failed, falling back to heuristic", exc_info=exc)
-        return _fallback_title(stripped_message, max_chars)
+        logger.warning(f"title_generator.generate_chat_title.llm_failed error_type={type(exc).__name__} error_message={str(exc)}", exc_info=exc)
+        fallback = _fallback_title(stripped_message, max_chars)
+        logger.info(f"title_generator.generate_chat_title.using_fallback fallback_title={fallback}")
+        return fallback
 
-    return _sanitize_title(raw_title, max_chars)
+    sanitized = _sanitize_title(raw_title, max_chars)
+    logger.info(f"title_generator.generate_chat_title.completed final_title={sanitized} was_truncated={len(raw_title) != len(sanitized)}")
+    return sanitized
 
 
 __all__ = ["generate_chat_title"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, MutableMapping, Sequence
 from openai import AsyncOpenAI
@@ -9,6 +10,75 @@ from openai.types.responses import Response
 from core.configs.llm_config import MODEL_NAME, OPENAI_API_KEY, REASONING_EFFORT, VERBOSITY
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_output_text(response: Response) -> str:
+    """
+    Normalize the Responses API output into a plain string.
+
+    The helper inspects multiple fields because `response.output_text` can be empty even
+    when the richer `output` payload still contains text blocks (e.g., `output_text` types).
+    """
+
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    outputs = getattr(response, "output", None)
+    if outputs:
+        fragments: list[str] = []
+        for item in outputs:
+            content_list = getattr(item, "content", None) or []
+            for block in content_list:
+                block_type = getattr(block, "type", None)
+                block_text = getattr(block, "text", None)
+                if block_type not in {"output_text", "text"}:
+                    continue
+
+                if isinstance(block_text, str) and block_text.strip():
+                    fragments.append(block_text.strip())
+                elif isinstance(block_text, list):
+                    sub_chunks = [
+                        chunk.strip()
+                        for chunk in block_text
+                        if isinstance(chunk, str) and chunk.strip()
+                    ]
+                    fragments.extend(sub_chunks)
+                elif isinstance(block_text, dict):
+                    text_value = block_text.get("text")
+                    if isinstance(text_value, str) and text_value.strip():
+                        fragments.append(text_value.strip())
+        if fragments:
+            return "\n".join(fragments)
+
+    text_list = getattr(response, "text", None)
+    if isinstance(text_list, list):
+        fragments = [chunk.strip() for chunk in text_list if isinstance(chunk, str) and chunk.strip()]
+        if fragments:
+            return "\n".join(fragments)
+
+    return ""
+
+
+ALLOWED_TEXT_TYPES = {"text", "input_text", "output_text"}
+
+
+def _coerce_dict_payload(item: dict[str, Any], text_type: str) -> dict[str, Any]:
+    """
+    Normalize a single dict payload into the Responses API compliant schema.
+
+    Anything that previously used {"type": "text"} (legacy ChatCompletion-style payloads)
+    will be rewritten to the correct `input_text` / `output_text` flavor.
+    """
+
+    item_type = item.get("type")
+    if item_type in {"output_text"}:
+        return {"type": "output_text", "text": item.get("text", "")}
+    if item_type in {"input_text", "text", None}:
+        return {"type": text_type, "text": item.get("text", "")}
+
+    # Non-text payload (images, tools, etc.) – pass through untouched.
+    return item
 
 
 def _coerce_content(content: Any, role: str) -> list[dict[str, Any]]:
@@ -20,14 +90,14 @@ def _coerce_content(content: Any, role: str) -> list[dict[str, Any]]:
     if isinstance(content, list):
         normalized: list[dict[str, Any]] = []
         for item in content:
-            if isinstance(item, dict) and "type" in item:
-                if item["type"] in {"text", "input_text", "output_text"}:
-                    normalized.append({"type": text_type if item["type"] != "output_text" else "output_text", "text": item.get("text", "")})
-                else:
-                    normalized.append(item)
+            if isinstance(item, dict):
+                normalized.append(_coerce_dict_payload(item, text_type))
             else:
                 normalized.append({"type": text_type, "text": str(item)})
         return normalized
+
+    if isinstance(content, dict):
+        return [_coerce_dict_payload(content, text_type)]
 
     if content is None:
         return [{"type": text_type, "text": ""}]
@@ -170,7 +240,33 @@ class OpenAIResponsesClient:
             reasoning_effort=reasoning_effort,
             **kwargs,
         )
-        return response.output_text
+
+        text_output = _extract_output_text(response)
+        has_structured_output = bool(getattr(response, "output", None))
+        logger.info(
+            "openai.create_text.response_inspection raw_len=%s normalized_len=%s has_structured_output=%s",
+            len(response.output_text or "") if isinstance(response.output_text, str) else 0,
+            len(text_output),
+            has_structured_output,
+        )
+        if not text_output:
+            serialized_output = None
+            outputs = getattr(response, "output", None)
+            if outputs:
+                try:
+                    serialized_output = json.dumps(
+                        [item.model_dump() for item in outputs], default=str
+                    )
+                except Exception:  # noqa: BLE001
+                    serialized_output = str(outputs)
+            logger.warning(
+                "openai.create_text.empty_output response_id=%s model=%s serialized_output=%s text_field=%s",
+                response.id,
+                response.model,
+                serialized_output[:512] if isinstance(serialized_output, str) else serialized_output,
+                getattr(response, "text", None),
+            )
+        return text_output
 
     async def stream_text(
         self,

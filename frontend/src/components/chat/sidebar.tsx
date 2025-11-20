@@ -74,9 +74,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     : "border-transparent hover:bg-sidebar-accent/70",
                 )}
               >
-                <span className="flex items-center gap-2 text-sm font-medium text-foreground">
-                  <SquarePen className="h-4 w-4 text-muted-foreground" />
-                  <span className="truncate">{session.title}</span>
+                <span className="flex items-start gap-2 text-foreground">
+                  <SquarePen className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span
+                    className={cn(
+                      "font-medium leading-snug break-words line-clamp-2",
+                      session.title.length > 40 ? "text-xs" : "text-sm"
+                    )}
+                    title={session.title}
+                  >
+                    {session.title}
+                  </span>
                 </span>
                 <div className="mt-1 flex items-center justify-between text-[11px] uppercase tracking-wide text-muted-foreground">
                   <span>{formatRelativeTime(session.lastUpdated)}</span>
